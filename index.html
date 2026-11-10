@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Vision People Counter</title>
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- TensorFlow & Model COCO-SSD -->
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen flex flex-col items-center p-4">
+
+  <!-- Header -->
+  <header class="w-full max-w-3xl flex items-center justify-between pb-4 mb-4 border-b border-slate-800">
+    <div>
+      <h1 class="text-xl font-bold text-emerald-400">People Counter Real-Time</h1>
+      <p class="text-xs text-slate-400">Deteksi kamera langsung via Browser</p>
+    </div>
+    <div class="bg-slate-900 border border-slate-700 px-4 py-2 rounded-xl flex items-center gap-3">
+      <div id="statusDot" class="h-2.5 w-2.5 rounded-full bg-slate-500"></div>
+      <span class="text-xs text-slate-400">Jumlah Orang:</span>
+      <span id="peopleCount" class="text-2xl font-bold text-white">0</span>
+    </div>
+  </header>
+
+  <!-- Bar Kontrol & Status -->
+  <div class="w-full max-w-3xl flex flex-wrap items-center justify-between gap-3 mb-4">
+    <button id="toggleCamBtn" class="bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-sm px-5 py-2.5 rounded-lg shadow transition-all active:scale-95">
+      Nyalakan Kamera
+    </button>
+    <div class="text-xs bg-slate-900 border border-slate-800 px-3 py-2 rounded-lg text-slate-300">
+      Status AI: <span id="aiStatus" class="text-amber-400 font-semibold">Sedang Mengunduh Model...</span>
+    </div>
+  </div>
+
+  <!-- Box Penampil Kamera -->
+  <main class="w-full max-w-3xl aspect-video bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden relative shadow-2xl flex items-center justify-center">
+    <!-- Pesan Awal / Error Log -->
+    <div id="noticeBox" class="absolute inset-0 flex flex-col items-center justify-center p-6 text-center z-10 bg-slate-900/90 pointer-events-none">
+      <p id="noticeText" class="text-slate-400 text-sm">Klik tombol <strong>"Nyalakan Kamera"</strong> di atas.</p>
+      <p id="errorMsg" class="text-rose-400 text-xs font-mono mt-2 hidden max-w-md bg-rose-950/60 p-2 rounded border border-rose-800"></p>
+    </div>
+
+    <!-- Video & Canvas Penanda -->
+    <video id="webcam" autoplay playsinline muted class="w-full h-full object-contain"></video>
+    <canvas id="canvas" class="absolute inset-0 w-full h-full object-contain pointer-events-none z-20"></canvas>
+  </main>
+
+  <!-- JAVASCRIPT LANGSUNG DI SATU TEMPAT -->
+  <script>
+    const video = document.getElementById('webcam');
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const countDisplay = document.getElementById('peopleCount');
+    const toggleCamBtn = document.getElementById('toggleCamBtn');
+    const aiStatus = document.getElementById('aiStatus');
+    const statusDot = document.getElementById('statusDot');
+    const noticeBox = document.getElementById('noticeBox');
+    const noticeText = document.getElementById('noticeText');
+    const errorMsg = document.getElementById('errorMsg');
+
+    let model = null;
+    let isCamRunning = false;
+    let isDetecting = false;
+
+    // 1. Tampilkan status awal
+    console.log("App ready. Menyiapkan inisialisasi model...");
+
+    // 2. Load Model COCO-SSD
+    async function loadModel() {
+      try {
+        model = await cocoSsd.load({ base: 'lite_mobilenet_v2' });
+        aiStatus.innerText = "Model AI Siap!";
+        aiStatus.className = "text-emerald-400 font-semibold";
+        statusDot.className = "h-2.5 w-2.5 rounded-full bg-emerald-500 animate-pulse";
+        if (isCamRunning && !isDetecting) {
+          detectLoop();
+        }
+      } catch (err) {
+        console.error("Gagal load AI:", err);
+        aiStatus.innerText = "Gagal Memuat AI (Koneksi bermasalah)";
+        aiStatus.className = "text-rose-400 font-semibold";
+      }
+    }
+    loadModel();
+
+    // 3. Fungsi Buka Kamera
+    async function startCamera() {
+      noticeText.innerText = "Menghubungkan webcam...";
+      errorMsg.classList.add('hidden');
+      toggleCamBtn.innerText = "Membuka Kamera...";
+      toggleCamBtn.disabled = true;
+
+      try {
+        // Cek dukungan getUserMedia
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          throw new Error("Browser memblokir kamera. Pastikan buka via Live Server (http://localhost), bukan file:///");
+        }
+
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { width: 640, height: 480 },
+          audio: false
+        });
+
+        video.srcObject = stream;
+        await video.play();
+
+        // Samakan ukuran canvas dengan resolusi video asli
+        canvas.width = video.videoWidth || 640;
+        canvas.height = video.videoHeight || 480;
+
+        isCamRunning = true;
+        noticeBox.classList.add('hidden');
+        toggleCamBtn.innerText = "Matikan Kamera";
+        toggleCamBtn.className = toggleCamBtn.className.replace('bg-emerald-600', 'bg-rose-600');
+        toggleCamBtn.disabled = false;
+
+        // Mulai deteksi jika model sudah ter-load
+        if (model && !isDetecting) {
+          detectLoop();
+        }
+      } catch (err) {
+        console.error("Camera Error:", err);
+        noticeBox.classList.remove('hidden');
+        noticeText.innerText = "Gagal Menyalakan Kamera";
+        errorMsg.innerText = `${err.name}: ${err.message}`;
+        errorMsg.classList.remove('hidden');
+
+        toggleCamBtn.innerText = "Nyalakan Kamera";
+        toggleCamBtn.disabled = false;
+        alert("Error Kamera: " + err.message + "\n\nPastikan izin kamera di-Allow dan tidak sedang dipakai app lain.");
+      }
+    }
+
+    // 4. Matikan Kamera
+    function stopCamera() {
+      if (video.srcObject) {
+        video.srcObject.getTracks().forEach(track => track.stop());
+      }
+      isCamRunning = false;
+      isDetecting = false;
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      countDisplay.innerText = "0";
+      noticeBox.classList.remove('hidden');
+      noticeText.innerText = "Kamera dimatikan.";
+      toggleCamBtn.innerText = "Nyalakan Kamera";
+      toggleCamBtn.className = toggleCamBtn.className.replace('bg-rose-600', 'bg-emerald-600');
+    }
+
+    // 5. Loop Deteksi Orang Real-Time
+    async function detectLoop() {
+      if (!isCamRunning || !model) {
+        isDetecting = false;
+        return;
+      }
+
+      isDetecting = true;
+
+      if (video.readyState >= 2) {
+        try {
+          const predictions = await model.detect(video);
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+          // Ambil hanya objek 'person' dengan akurasi >= 50%
+          const people = predictions.filter(p => p.class === 'person' && p.score >= 0.5);
+
+          people.forEach((p, idx) => {
+            const [x, y, w, h] = p.bbox;
+
+            // Gambar kotak
+            ctx.strokeStyle = '#10b981';
+            ctx.lineWidth = 3;
+            ctx.strokeRect(x, y, w, h);
+
+            // Label tag
+            ctx.fillStyle = '#10b981';
+            const label = `Person #${idx + 1} (${Math.round(p.score * 100)}%)`;
+            ctx.font = '14px sans-serif';
+            ctx.fillRect(x, y > 22 ? y - 22 : y, ctx.measureText(label).width + 8, 20);
+
+            ctx.fillStyle = '#ffffff';
+            ctx.fillText(label, x + 4, y > 22 ? y - 7 : y + 15);
+          });
+
+          countDisplay.innerText = people.length;
+        } catch (e) {
+          console.warn("Frame skip:", e);
+        }
+      }
+
+      requestAnimationFrame(detectLoop);
+    }
+
+    // Event Klik Tombol
+    toggleCamBtn.addEventListener('click', () => {
+      if (!isCamRunning) {
+        startCamera();
+      } else {
+        stopCamera();
+      }
+    });
+  </script>
+</body>
+</html>
